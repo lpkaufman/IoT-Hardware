@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from .jira import JiraClient
@@ -33,6 +34,8 @@ class OnshapeJiraSync:
         self.onshape = onshape
         self.jira = jira
         self.state_store = state_store
+        self._locks_guard = Lock()
+        self._document_locks: dict[str, Lock] = {}
 
     def handle_webhook(self, payload: dict[str, Any]) -> SyncResult:
         event = str(payload.get("event", ""))
@@ -50,31 +53,44 @@ class OnshapeJiraSync:
         self, document_id: str, *, workspace_id: str | None = None
     ) -> SyncResult:
         snapshot = self.onshape.document_snapshot(document_id, workspace_id)
-        record = self.state_store.get(document_id)
-        if record is None:
-            description_lines = issue_description_lines(snapshot, [])
-            issue_key = self.jira.create_story(
+        with self._lock_for_document(document_id):
+            record = self.state_store.get(document_id)
+            if record is None:
+                description_lines = issue_description_lines(snapshot, [])
+                issue_key = self.jira.create_story(
+                    summary=snapshot.name,
+                    description_lines=description_lines,
+                    document_id=document_id,
+                )
+                self.state_store.upsert(
+                    document_id,
+                    DocumentRecord(issue_key=issue_key, document_name=snapshot.name),
+                )
+                return SyncResult(
+                    status="created", document_id=document_id, issue_key=issue_key
+                )
+
+            updated_record = _record_with_name_change(record, snapshot.name)
+            description_lines = issue_description_lines(
+                snapshot, updated_record.name_changes
+            )
+            self.jira.update_issue(
+                record.issue_key,
                 summary=snapshot.name,
                 description_lines=description_lines,
-                document_id=document_id,
             )
-            self.state_store.upsert(
-                document_id,
-                DocumentRecord(issue_key=issue_key, document_name=snapshot.name),
+            self.state_store.upsert(document_id, updated_record)
+            return SyncResult(
+                status="updated", document_id=document_id, issue_key=record.issue_key
             )
-            return SyncResult(status="created", document_id=document_id, issue_key=issue_key)
 
-        updated_record = _record_with_name_change(record, snapshot.name)
-        description_lines = issue_description_lines(snapshot, updated_record.name_changes)
-        self.jira.update_issue(
-            record.issue_key,
-            summary=snapshot.name,
-            description_lines=description_lines,
-        )
-        self.state_store.upsert(document_id, updated_record)
-        return SyncResult(
-            status="updated", document_id=document_id, issue_key=record.issue_key
-        )
+    def _lock_for_document(self, document_id: str) -> Lock:
+        with self._locks_guard:
+            lock = self._document_locks.get(document_id)
+            if lock is None:
+                lock = Lock()
+                self._document_locks[document_id] = lock
+            return lock
 
 
 def issue_description_lines(

@@ -1,4 +1,6 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -11,35 +13,56 @@ class FakeOnshapeClient:
     def __init__(self, snapshots):
         self.snapshots = list(snapshots)
         self.calls = []
+        self.lock = threading.Lock()
 
     def document_snapshot(self, document_id, workspace_id=None):
-        self.calls.append({"document_id": document_id, "workspace_id": workspace_id})
-        return self.snapshots.pop(0)
+        with self.lock:
+            self.calls.append({"document_id": document_id, "workspace_id": workspace_id})
+            return self.snapshots.pop(0)
+
+
+class BarrierOnshapeClient(FakeOnshapeClient):
+    def __init__(self, snapshots, parties):
+        super().__init__(snapshots)
+        self.barrier = threading.Barrier(parties)
+
+    def document_snapshot(self, document_id, workspace_id=None):
+        with self.lock:
+            self.calls.append({"document_id": document_id, "workspace_id": workspace_id})
+        self.barrier.wait(timeout=5)
+        with self.lock:
+            return self.snapshots.pop(0)
 
 
 class FakeJiraClient:
-    def __init__(self):
+    def __init__(self, *, create_delay=0):
         self.created = []
         self.updated = []
+        self.create_delay = create_delay
+        self.lock = threading.Lock()
 
     def create_story(self, *, summary, description_lines, document_id):
-        self.created.append(
-            {
-                "summary": summary,
-                "description_lines": description_lines,
-                "document_id": document_id,
-            }
-        )
+        if self.create_delay:
+            time.sleep(self.create_delay)
+        with self.lock:
+            self.created.append(
+                {
+                    "summary": summary,
+                    "description_lines": description_lines,
+                    "document_id": document_id,
+                }
+            )
         return "IOT-100"
 
     def update_issue(self, issue_key, *, summary, description_lines):
-        self.updated.append(
-            {
-                "issue_key": issue_key,
-                "summary": summary,
-                "description_lines": description_lines,
-            }
-        )
+        with self.lock:
+            self.updated.append(
+                {
+                    "issue_key": issue_key,
+                    "summary": summary,
+                    "description_lines": description_lines,
+                }
+            )
 
 
 class SyncTest(unittest.TestCase):
@@ -127,8 +150,70 @@ class SyncTest(unittest.TestCase):
             "Gateway -> Gateway Rev B", jira.updated[0]["description_lines"]
         )
 
+    def test_concurrent_same_document_events_create_single_story(self):
+        snapshots = [
+            OnshapeDocumentSnapshot(
+                document_id="doc-1",
+                name="Gateway",
+                workspace_id="wid-1",
+                tabs=["Part Studio"],
+                versions=[],
+                branches=["Main"],
+            ),
+            OnshapeDocumentSnapshot(
+                document_id="doc-1",
+                name="Gateway",
+                workspace_id="wid-1",
+                tabs=["Part Studio"],
+                versions=[],
+                branches=["Main"],
+            ),
+        ]
+        onshape = BarrierOnshapeClient(snapshots, parties=2)
+        jira = FakeJiraClient(create_delay=0.05)
+        results = []
+        errors = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            sync = OnshapeJiraSync(
+                onshape, jira, StateStore(Path(directory) / "state.json")
+            )
+
+            def handle_created_webhook():
+                try:
+                    results.append(
+                        sync.handle_webhook(
+                            {
+                                "event": "onshape.document.lifecycle.created",
+                                "documentId": "doc-1",
+                                "workspaceId": "wid-1",
+                            }
+                        )
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(target=handle_created_webhook),
+                threading.Thread(target=handle_created_webhook),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+        if errors:
+            raise errors[0]
+        self.assertEqual(len(jira.created), 1)
+        self.assertEqual(len(jira.updated), 1)
+        self.assertCountEqual(
+            [result.status for result in results], ["created", "updated"]
+        )
+
     def test_ping_events_are_ignored(self):
-        sync = OnshapeJiraSync(FakeOnshapeClient([]), FakeJiraClient(), StateStore(Path("unused")))
+        sync = OnshapeJiraSync(
+            FakeOnshapeClient([]), FakeJiraClient(), StateStore(Path("unused"))
+        )
 
         result = sync.handle_webhook({"event": "webhook.ping"})
 
