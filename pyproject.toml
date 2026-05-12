@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iot-hardware-onshape-jira"
+version = "0.1.0"
+description = "Webhook integration that creates and updates Jira stories from Onshape documents."
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["onshape_jira*"]
