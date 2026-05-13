@@ -1,7 +1,15 @@
 import unittest
 
-from onshape_jira.config import JiraConfig
-from onshape_jira.jira import JiraClient, plain_text_from_adf
+from onshape_jira.config import (
+    DEFAULT_INVESTMENTS_CATEGORY,
+    DEFAULT_WORKFLOW,
+    JiraConfig,
+)
+from onshape_jira.jira import (
+    JiraClient,
+    _investments_category_api_object,
+    plain_text_from_adf,
+)
 
 
 class RecordingHttpClient:
@@ -18,6 +26,31 @@ class RecordingHttpClient:
 
 
 class JiraClientTest(unittest.TestCase):
+    def test_iot_hw_investment_field_infer_option_id_when_label_is_default(self):
+        cfg = JiraConfig(
+            base_url="https://cmtelematics.atlassian.net",
+            email="robot@example.com",
+            api_token="secret",
+            project_key="IOTHW",
+            investments_category_field_id="customfield_11822",
+            investments_category_value=DEFAULT_INVESTMENTS_CATEGORY,
+        )
+        self.assertEqual(_investments_category_api_object(cfg), {"id": "11740"})
+
+    def test_investment_inference_skipped_when_field_id_differs(self):
+        cfg = JiraConfig(
+            base_url="https://example.atlassian.net",
+            email="robot@example.com",
+            api_token="secret",
+            project_key="IOTHW",
+            investments_category_field_id="customfield_99999",
+            investments_category_value=DEFAULT_INVESTMENTS_CATEGORY,
+        )
+        self.assertEqual(
+            _investments_category_api_object(cfg),
+            {"value": DEFAULT_INVESTMENTS_CATEGORY},
+        )
+
     def test_create_story_sets_required_fields(self):
         http = RecordingHttpClient()
         config = JiraConfig(
@@ -45,9 +78,9 @@ class JiraClientTest(unittest.TestCase):
         self.assertEqual(fields["summary"], "Gateway Controller")
         self.assertEqual(
             fields["customfield_10010"],
-            {"value": "Planned - Product & Engineering"},
+            {"value": "Planned \u2013 Product & Engineering"},
         )
-        self.assertEqual(fields["customfield_10011"], {"value": "IoT Workflows"})
+        self.assertEqual(fields["customfield_10011"], {"value": DEFAULT_WORKFLOW})
         self.assertEqual(
             plain_text_from_adf(fields["description"]),
             "Tabs:\nPart Studio\nAssembly",
@@ -56,6 +89,27 @@ class JiraClientTest(unittest.TestCase):
             request["body"]["properties"],
             [{"key": "onshape", "value": {"documentId": "doc-1"}}],
         )
+
+    def test_create_story_prefers_investment_category_option_id(self):
+        http = RecordingHttpClient()
+        config = JiraConfig(
+            base_url="https://example.atlassian.net",
+            email="robot@example.com",
+            api_token="secret",
+            project_key="IOT",
+            investments_category_field_id="customfield_10010",
+            investments_category_value="Ignored when id set",
+            investments_category_option_id="11822-opt-99",
+        )
+        client = JiraClient(config, http_client=http)
+        issue_key = client.create_story(
+            summary="Chip",
+            description_lines=["Tabs:", "Asm"],
+            document_id="d-99",
+        )
+        self.assertEqual(issue_key, "IOT-123")
+        fields = http.requests[0]["body"]["fields"]
+        self.assertEqual(fields["customfield_10010"], {"id": "11822-opt-99"})
 
     def test_update_issue_does_not_send_project_or_issue_type(self):
         http = RecordingHttpClient()

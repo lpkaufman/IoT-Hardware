@@ -2,10 +2,43 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Iterable
 
-from .config import JiraConfig
+from .config import (
+    DEFAULT_INVESTMENTS_CATEGORY,
+    KNOWN_CMTELEMATICS_IOTHW_DEFAULT_INVESTMENTS_OPTION_ID,
+    KNOWN_CMTELEMATICS_IOTHW_INVESTMENTS_CATEGORY_FIELD_ID,
+    JiraConfig,
+)
 from .http import BasicAuth, JsonHttpClient
+
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _investments_category_api_object(config: JiraConfig) -> dict[str, str]:
+    """Single-select Investment Category as REST expects it: by option id or by value."""
+
+    option_id = config.investments_category_option_id.strip()
+    field_id = config.investments_category_field_id.strip()
+    value_label = config.investments_category_value.strip()
+
+    if not option_id and (
+        field_id == KNOWN_CMTELEMATICS_IOTHW_INVESTMENTS_CATEGORY_FIELD_ID
+        and value_label == DEFAULT_INVESTMENTS_CATEGORY
+    ):
+        option_id = KNOWN_CMTELEMATICS_IOTHW_DEFAULT_INVESTMENTS_OPTION_ID
+        _LOGGER.debug(
+            "%s paired with Planned default → option id=%s",
+            field_id,
+            option_id,
+        )
+
+    if option_id:
+        return {"id": option_id}
+    return {"value": value_label}
 
 
 def description_adf(lines: Iterable[str]) -> dict[str, Any]:
@@ -61,18 +94,41 @@ class JiraClient:
                 }
             ],
         }
+        _LOGGER.info(
+            "Jira POST /issue project=%s type=%s onshape_document_id=%s summary=%s",
+            self.config.project_key,
+            self.config.issue_type,
+            document_id,
+            summary[:200] + ("..." if len(summary) > 200 else ""),
+        )
         response = self._request("POST", "/rest/api/3/issue", payload)
         issue_key = response.get("key") if isinstance(response, dict) else None
         if not isinstance(issue_key, str) or not issue_key:
-            raise RuntimeError(f"Jira create issue response did not include key: {response}")
+            raise RuntimeError(
+                f"Jira create issue response did not include key: {response}"
+            )
+        _LOGGER.info("Jira issue created issue_key=%s", issue_key)
         return issue_key
 
-    def update_issue(self, issue_key: str, *, summary: str, description_lines: list[str]) -> None:
+    def update_issue(
+        self, issue_key: str, *, summary: str, description_lines: list[str]
+    ) -> None:
+        _LOGGER.info(
+            "Jira PUT /issue/%s summary=%s description_lines=%d",
+            issue_key,
+            summary[:200] + ("..." if len(summary) > 200 else ""),
+            len(description_lines),
+        )
         self._request(
             "PUT",
             f"/rest/api/3/issue/{issue_key}",
-            {"fields": self._issue_fields(summary, description_lines, include_project=False)},
+            {
+                "fields": self._issue_fields(
+                    summary, description_lines, include_project=False
+                )
+            },
         )
+        _LOGGER.debug("Jira PUT /issue/%s completed", issue_key)
 
     def _issue_fields(
         self,
@@ -84,21 +140,47 @@ class JiraClient:
         fields: dict[str, Any] = {
             "summary": summary,
             "description": description_adf(description_lines),
-            self.config.investments_category_field_id: {
-                "value": self.config.investments_category_value
-            },
+            self.config.investments_category_field_id: _investments_category_api_object(
+                self.config
+            ),
         }
         if include_project:
             fields["project"] = {"key": self.config.project_key}
             fields["issuetype"] = {"name": self.config.issue_type}
         if self.config.workflow_field_id:
-            fields[self.config.workflow_field_id] = {"value": self.config.workflow_value}
+            fields[self.config.workflow_field_id] = {
+                "value": self.config.workflow_value
+            }
         return fields
 
     def _request(self, method: str, path: str, body: dict[str, Any]) -> Any:
-        return self.http_client.request_json(
+        url = self.config.base_url + path
+        started = time.perf_counter()
+
+        headers = {
+            "Authorization": self._auth_header,
+            "Content-Type": "application/json",
+        }
+        api_path = path if len(path) <= 200 else path[:197] + "..."
+        try:
+            response = self.http_client.request_json(
+                method, url, headers=headers, body=body
+            )
+        except Exception:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            _LOGGER.exception(
+                "Jira API request failed method=%s path=%s elapsed_ms=%.1f",
+                method,
+                api_path,
+                elapsed_ms,
+            )
+            raise
+
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        _LOGGER.debug(
+            "Jira API %s path=%s elapsed_ms=%.1f",
             method,
-            self.config.base_url + path,
-            headers={"Authorization": self._auth_header, "Content-Type": "application/json"},
-            body=body,
+            api_path,
+            elapsed_ms,
         )
+        return response

@@ -7,6 +7,7 @@ name = "iot-hardware-onshape-jira"
 version = "0.1.0"
 description = "Webhook integration that creates and updates Jira stories from Onshape documents."
 requires-python = ">=3.11"
+dependencies = ["python-dotenv>=1.0", "certifi>=2023"]
 
 [tool.setuptools.packages.find]
 include = ["onshape_jira*"]

@@ -13,6 +13,8 @@ class DocumentRecord:
     issue_key: str
     document_name: str = ""
     name_changes: list[str] = field(default_factory=list)
+    snapshot_fingerprint: str = ""
+    last_issue_summary: str = ""
 
 
 class StateStore:
@@ -31,10 +33,18 @@ class StateStore:
         name_changes = raw_record.get("name_changes", [])
         if not isinstance(name_changes, list):
             name_changes = []
+        fingerprint = raw_record.get("snapshot_fingerprint", "")
+        if not isinstance(fingerprint, str):
+            fingerprint = ""
+        last_summary = raw_record.get("last_issue_summary", "")
+        if not isinstance(last_summary, str):
+            last_summary = ""
         return DocumentRecord(
             issue_key=issue_key,
             document_name=str(raw_record.get("document_name", "")),
             name_changes=[str(change) for change in name_changes],
+            snapshot_fingerprint=fingerprint,
+            last_issue_summary=last_summary,
         )
 
     def upsert(self, document_id: str, record: DocumentRecord) -> None:
@@ -43,6 +53,8 @@ class StateStore:
             "issue_key": record.issue_key,
             "document_name": record.document_name,
             "name_changes": record.name_changes,
+            "snapshot_fingerprint": record.snapshot_fingerprint,
+            "last_issue_summary": record.last_issue_summary,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self.path.with_suffix(self.path.suffix + ".tmp")

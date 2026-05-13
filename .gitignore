@@ -1,6 +1,8 @@
+.env
 .onshape_jira_state.json
 .onshape_jira_state.json.tmp
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+*.egg-info/
